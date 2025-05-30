@@ -28,11 +28,11 @@ app = FastAPI(
     title="Dataset Search API",
     description="API for searching datasets using vector similarity",
     version="1.0.0",
-    docs_url="/docs" if os.getenv("NODE_ENV") != "production" else None,
-    redoc_url="/redoc" if os.getenv("NODE_ENV") != "production" else None
+    docs_url="/docs" if os.getenv("VERCEL_ENV") != "production" else None,
+    redoc_url="/redoc" if os.getenv("VERCEL_ENV") != "production" else None
 )
 
-# Response model
+# Response models
 class SearchResponse(BaseModel):
     query: str
     collection_name: str
@@ -47,7 +47,7 @@ class HealthResponse(BaseModel):
     timestamp: str
     environment: str
 
-# Global variables for caching (in serverless, these reset on each cold start)
+# Global variables for caching
 _knowledge_cache = {}
 
 def get_knowledge_instance(collection_name: str):
@@ -58,7 +58,6 @@ def get_knowledge_instance(collection_name: str):
             detail="Knowledge modules not available"
         )
     
-    # Simple caching - in production, consider using Redis or similar
     cache_key = f"knowledge_{collection_name}"
     if cache_key not in _knowledge_cache:
         try:
@@ -81,7 +80,7 @@ def get_knowledge_instance(collection_name: str):
     return _knowledge_cache[cache_key]
 
 def search_datasets_by_similarity(query_text: str, collection_name: str) -> Union[List[Any], str, dict]:
-    """Search for the most relevant datasets using vector similarity based on user query"""
+    """Search for the most relevant datasets using vector similarity"""
     try:
         knowledge_instance = get_knowledge_instance(collection_name)
         result = knowledge_instance.query([query_text])
@@ -102,16 +101,15 @@ async def root():
         "message": "Dataset Search API",
         "version": "1.0.0",
         "status": "running",
-        "environment": os.getenv("NODE_ENV", "development"),
+        "environment": os.getenv("VERCEL_ENV", "development"),
         "knowledge_available": KNOWLEDGE_AVAILABLE,
         "endpoints": {
-            "/search": "Search datasets by similarity",
-            "/health": "Health check endpoint",
-            "/docs": "API documentation (development only)",
+            "/api/search": "Search datasets by similarity",
+            "/api/health": "Health check endpoint",
         }
     }
 
-@app.get("/search", response_model=SearchResponse)
+@app.get("/api/search", response_model=SearchResponse)
 async def search_datasets(
     request: Request,
     query: str = Query(
@@ -128,15 +126,12 @@ async def search_datasets(
         alias="id"
     )
 ):
-    """
-    Search for datasets using vector similarity based on the provided query.
-    """
+    """Search for datasets using vector similarity"""
     start_time = datetime.utcnow()
     
     try:
-        logger.info(f"Search request - Query: '{query}' Collection: '{id}' IP: {request.client.host}")
+        logger.info(f"Search request - Query: '{query}' Collection: '{id}'")
         
-        # Validate inputs
         if not query or query.strip() == "":
             raise HTTPException(status_code=400, detail="Query parameter cannot be empty")
         
@@ -149,10 +144,8 @@ async def search_datasets(
                 detail="Knowledge search service is temporarily unavailable"
             )
         
-        # Perform the search
         results = search_datasets_by_similarity(query.strip(), id.strip())
         
-        # Calculate results count
         results_count = 0
         if isinstance(results, list):
             results_count = len(results)
@@ -184,7 +177,7 @@ async def search_datasets(
             detail="Internal server error during search"
         )
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/api/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
     try:
@@ -192,7 +185,7 @@ async def health_check():
             status="healthy",
             service="Dataset Search API",
             timestamp=datetime.utcnow().isoformat() + "Z",
-            environment=os.getenv("NODE_ENV", "development")
+            environment=os.getenv("VERCEL_ENV", "development")
         )
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
@@ -221,29 +214,20 @@ async def internal_error_handler(request: Request, exc):
         }
     )
 
-# Add CORS middleware if needed for web clients
+# CORS middleware
 from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-# Vercel serverless handler
-def handler(event, context):
+# This is the handler that Vercel will use
+def handler(request):
     """Vercel serverless handler"""
-    return app
-
-# For local development
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    from mangum import Mangum
+    asgi_handler = Mangum(app)
+    return asgi_handler(request, {})
