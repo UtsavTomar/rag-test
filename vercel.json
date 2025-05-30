@@ -2,16 +2,11 @@
   "version": 2,
   "builds": [
     {
-      "src": "app.py",
+      "src": "api/app.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "app.py" }
-  ],
-  "env": {
-    "VERCEL": "1",
-    "LOG_LEVEL": "INFO",
-    "JSON_LOGGING": "1"
-  }
+    { "src": "/(.*)", "dest": "api/app.py" }
+  ]
 }

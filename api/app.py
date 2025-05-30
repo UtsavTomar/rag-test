@@ -13,11 +13,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(
-    title="Dataset Search API",
-    description="API for searching datasets using vector similarity",
-    version="1.0.0"
-)
+app = FastAPI()
 
 # Response model
 class SearchResponse(BaseModel):
@@ -163,13 +159,5 @@ async def internal_error_handler(request, exc):
         content={"error": "Internal server error", "detail": "An unexpected error occurred"}
     )
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "app:app",  # Replace "main" with your filename if different
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+
 
