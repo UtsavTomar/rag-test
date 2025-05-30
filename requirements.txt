@@ -4,3 +4,4 @@ uvicorn
 PyJWT
 openai
 numpy
+python-dotenv
