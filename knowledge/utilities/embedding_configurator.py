@@ -1,8 +1,36 @@
 import os
-from typing import Any, Dict, Optional, cast
+import numpy as np
+from typing import Any, Dict, Optional, List, Union, cast
+from abc import ABC, abstractmethod
 
-from chromadb import Documents, EmbeddingFunction, Embeddings
-from chromadb.api.types import validate_embedding_function
+
+Documents = Union[str, List[str]]
+Embeddings = np.ndarray
+
+
+class EmbeddingFunction(ABC):
+    
+    @abstractmethod
+    def __call__(self, input: Documents) -> Embeddings:
+        """
+        Embed the input documents and return numpy array
+        
+        Args:
+            input: Single string or list of strings to embed
+            
+        Returns:
+            numpy array of embeddings with shape (n_docs, embedding_dim)
+        """
+        pass
+
+
+def validate_embedding_function(embedding_function: EmbeddingFunction) -> bool:
+    """Validate that the embedding function works correctly"""
+    try:
+        test_result = embedding_function(["test"])
+        return isinstance(test_result, np.ndarray) and len(test_result.shape) == 2
+    except Exception:
+        return False
 
 
 class EmbeddingConfigurator:
@@ -47,9 +75,27 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _create_default_embedding_function():
-        from chromadb.utils.embedding_functions.openai_embedding_function import (
-            OpenAIEmbeddingFunction,
-        )
+        class OpenAIEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, api_key=None, model_name="text-embedding-3-small"):
+                try:
+                    import openai
+                except ImportError:
+                    raise ImportError("OpenAI package not installed. Install with: pip install openai")
+                
+                self.client = openai.OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+                self.model_name = model_name
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                if isinstance(input, str):
+                    input = [input]
+                
+                response = self.client.embeddings.create(
+                    input=input,
+                    model=self.model_name
+                )
+                
+                embeddings = [item.embedding for item in response.data]
+                return np.array(embeddings)
 
         return OpenAIEmbeddingFunction(
             api_key=os.getenv("OPENAI_API_KEY"), model_name="text-embedding-3-small"
@@ -57,9 +103,41 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_openai(config, model_name):
-        from chromadb.utils.embedding_functions.openai_embedding_function import (
-            OpenAIEmbeddingFunction,
-        )
+        class OpenAIEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, api_key=None, model_name="text-embedding-3-small", 
+                        api_base=None, api_type=None, api_version=None,
+                        default_headers=None, dimensions=None, deployment_id=None,
+                        organization_id=None):
+                try:
+                    import openai
+                except ImportError:
+                    raise ImportError("OpenAI package not installed. Install with: pip install openai")
+                
+                client_kwargs = {}
+                if api_key:
+                    client_kwargs['api_key'] = api_key
+                if api_base:
+                    client_kwargs['base_url'] = api_base
+                if organization_id:
+                    client_kwargs['organization'] = organization_id
+                if default_headers:
+                    client_kwargs['default_headers'] = default_headers
+                
+                self.client = openai.OpenAI(**client_kwargs)
+                self.model_name = model_name
+                self.dimensions = dimensions
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                if isinstance(input, str):
+                    input = [input]
+                
+                kwargs = {'input': input, 'model': self.model_name}
+                if self.dimensions:
+                    kwargs['dimensions'] = self.dimensions
+                
+                response = self.client.embeddings.create(**kwargs)
+                embeddings = [item.embedding for item in response.data]
+                return np.array(embeddings)
 
         return OpenAIEmbeddingFunction(
             api_key=config.get("api_key") or os.getenv("OPENAI_API_KEY"),
@@ -75,11 +153,37 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_azure(config, model_name):
-        from chromadb.utils.embedding_functions.openai_embedding_function import (
-            OpenAIEmbeddingFunction,
-        )
+        class AzureOpenAIEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, api_key=None, api_base=None, api_type="azure", 
+                        api_version=None, model_name=None, default_headers=None,
+                        dimensions=None, deployment_id=None, organization_id=None):
+                try:
+                    import openai
+                except ImportError:
+                    raise ImportError("OpenAI package not installed. Install with: pip install openai")
+                
+                self.client = openai.AzureOpenAI(
+                    api_key=api_key,
+                    azure_endpoint=api_base,
+                    api_version=api_version,
+                    azure_deployment=deployment_id or model_name
+                )
+                self.model_name = deployment_id or model_name
+                self.dimensions = dimensions
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                if isinstance(input, str):
+                    input = [input]
+                
+                kwargs = {'input': input, 'model': self.model_name}
+                if self.dimensions:
+                    kwargs['dimensions'] = self.dimensions
+                
+                response = self.client.embeddings.create(**kwargs)
+                embeddings = [item.embedding for item in response.data]
+                return np.array(embeddings)
 
-        return OpenAIEmbeddingFunction(
+        return AzureOpenAIEmbeddingFunction(
             api_key=config.get("api_key"),
             api_base=config.get("api_base"),
             api_type=config.get("api_type", "azure"),
@@ -93,9 +197,28 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_ollama(config, model_name):
-        from chromadb.utils.embedding_functions.ollama_embedding_function import (
-            OllamaEmbeddingFunction,
-        )
+        class OllamaEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, url="http://localhost:11434/api/embeddings", model_name=None):
+                self.url = url
+                self.model_name = model_name
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                import requests
+                
+                if isinstance(input, str):
+                    input = [input]
+                
+                all_embeddings = []
+                for text in input:
+                    response = requests.post(
+                        self.url,
+                        json={"model": self.model_name, "prompt": text}
+                    )
+                    response.raise_for_status()
+                    embedding = response.json()["embedding"]
+                    all_embeddings.append(embedding)
+                
+                return np.array(all_embeddings)
 
         return OllamaEmbeddingFunction(
             url=config.get("url", "http://localhost:11434/api/embeddings"),
@@ -104,9 +227,31 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_vertexai(config, model_name):
-        from chromadb.utils.embedding_functions.google_embedding_function import (
-            GoogleVertexEmbeddingFunction,
-        )
+        class GoogleVertexEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, model_name=None, api_key=None, project_id=None, region=None):
+                try:
+                    import google.auth
+                    from google.cloud import aiplatform
+                except ImportError:
+                    raise ImportError("Google Cloud AI Platform not installed. Install with: pip install google-cloud-aiplatform")
+                
+                self.model_name = model_name
+                self.project_id = project_id
+                self.region = region
+                
+                if project_id and region:
+                    aiplatform.init(project=project_id, location=region)
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                from google.cloud import aiplatform
+                
+                if isinstance(input, str):
+                    input = [input]
+                
+                model = aiplatform.TextEmbeddingModel.from_pretrained(self.model_name)
+                embeddings = model.get_embeddings(input)
+                
+                return np.array([emb.values for emb in embeddings])
 
         return GoogleVertexEmbeddingFunction(
             model_name=model_name,
@@ -117,9 +262,33 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_google(config, model_name):
-        from chromadb.utils.embedding_functions.google_embedding_function import (
-            GoogleGenerativeAiEmbeddingFunction,
-        )
+        class GoogleGenerativeAiEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, model_name=None, api_key=None, task_type=None):
+                try:
+                    import google.generativeai as genai
+                except ImportError:
+                    raise ImportError("Google GenerativeAI not installed. Install with: pip install google-generativeai")
+                
+                genai.configure(api_key=api_key)
+                self.model_name = model_name
+                self.task_type = task_type
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                import google.generativeai as genai
+                
+                if isinstance(input, str):
+                    input = [input]
+                
+                embeddings = []
+                for text in input:
+                    result = genai.embed_content(
+                        model=self.model_name,
+                        content=text,
+                        task_type=self.task_type
+                    )
+                    embeddings.append(result['embedding'])
+                
+                return np.array(embeddings)
 
         return GoogleGenerativeAiEmbeddingFunction(
             model_name=model_name,
@@ -129,9 +298,26 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_cohere(config, model_name):
-        from chromadb.utils.embedding_functions.cohere_embedding_function import (
-            CohereEmbeddingFunction,
-        )
+        class CohereEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, model_name=None, api_key=None):
+                try:
+                    import cohere
+                except ImportError:
+                    raise ImportError("Cohere not installed. Install with: pip install cohere")
+                
+                self.client = cohere.Client(api_key)
+                self.model_name = model_name
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                if isinstance(input, str):
+                    input = [input]
+                
+                response = self.client.embed(
+                    texts=input,
+                    model=self.model_name
+                )
+                
+                return np.array(response.embeddings)
 
         return CohereEmbeddingFunction(
             model_name=model_name,
@@ -140,9 +326,26 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_voyageai(config, model_name):
-        from chromadb.utils.embedding_functions.voyageai_embedding_function import (
-            VoyageAIEmbeddingFunction,
-        )
+        class VoyageAIEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, model_name=None, api_key=None):
+                try:
+                    import voyageai
+                except ImportError:
+                    raise ImportError("VoyageAI not installed. Install with: pip install voyageai")
+                
+                self.client = voyageai.Client(api_key=api_key)
+                self.model_name = model_name
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                if isinstance(input, str):
+                    input = [input]
+                
+                result = self.client.embed(
+                    texts=input,
+                    model=self.model_name
+                )
+                
+                return np.array(result.embeddings)
 
         return VoyageAIEmbeddingFunction(
             model_name=model_name,
@@ -151,9 +354,37 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_bedrock(config, model_name):
-        from chromadb.utils.embedding_functions.amazon_bedrock_embedding_function import (
-            AmazonBedrockEmbeddingFunction,
-        )
+        class AmazonBedrockEmbeddingFunction(EmbeddingFunction):
+            def __init__(self, session=None, model_name=None):
+                try:
+                    import boto3
+                except ImportError:
+                    raise ImportError("Boto3 not installed. Install with: pip install boto3")
+                
+                self.session = session or boto3.Session()
+                self.client = self.session.client('bedrock-runtime')
+                self.model_name = model_name or "amazon.titan-embed-text-v1"
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                import json
+                
+                if isinstance(input, str):
+                    input = [input]
+                
+                embeddings = []
+                for text in input:
+                    body = json.dumps({"inputText": text})
+                    response = self.client.invoke_model(
+                        body=body,
+                        modelId=self.model_name,
+                        accept='application/json',
+                        contentType='application/json'
+                    )
+                    
+                    result = json.loads(response['body'].read())
+                    embeddings.append(result['embedding'])
+                
+                return np.array(embeddings)
 
         # Allow custom model_name override with backwards compatibility
         kwargs = {"session": config.get("session")}
@@ -163,9 +394,23 @@ class EmbeddingConfigurator:
 
     @staticmethod
     def _configure_huggingface(config, model_name):
-        from chromadb.utils.embedding_functions.huggingface_embedding_function import (
-            HuggingFaceEmbeddingServer,
-        )
+        class HuggingFaceEmbeddingServer(EmbeddingFunction):
+            def __init__(self, url=None):
+                self.url = url
+            
+            def __call__(self, input: Documents) -> Embeddings:
+                import requests
+                
+                if isinstance(input, str):
+                    input = [input]
+                
+                response = requests.post(
+                    self.url,
+                    json={"inputs": input}
+                )
+                response.raise_for_status()
+                
+                return np.array(response.json())
 
         return HuggingFaceEmbeddingServer(
             url=config.get("api_url"),
@@ -203,7 +448,7 @@ class EmbeddingConfigurator:
 
                 try:
                     embeddings = embedding.embed_documents(input)
-                    return cast(Embeddings, embeddings)
+                    return cast(Embeddings, np.array(embeddings))
                 except Exception as e:
                     print("Error during Watson embedding:", e)
                     raise e
