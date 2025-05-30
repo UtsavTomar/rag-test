@@ -1,0 +1,9 @@
+psycopg2-binary
+fastapi
+uvicorn
+httpx
+PyJWT>=2.0.0
+cryptography>=44.0.0  # Required for RSA algorithm support in PyJWT
+python-dotenv
+requests
+openai
