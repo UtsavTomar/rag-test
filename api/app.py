@@ -72,13 +72,13 @@ async def search_datasets(
     
     Args:
         query: The search query string
-        id: The collection name/ID to search within (defaults to 'json_test')
+        id: The database name/ID to search within (defaults to 'json_test')
         
     Returns:
-        SearchResponse: Contains the query, collection_name, results, and status
+        SearchResponse: Contains the query, database_name, results, and status
     """
     try:
-        logger.info(f"Received search request for query: '{query}' in collection: '{id}'")
+        logger.info(f"Received search request for query: '{query}' in database: '{id}'")
         
         # Validate query
         if not query or query.strip() == "":
@@ -87,11 +87,11 @@ async def search_datasets(
                 detail="Query parameter cannot be empty"
             )
         
-        # Validate collection name
+        # Validate database name
         if not id or id.strip() == "":
             raise HTTPException(
                 status_code=400, 
-                detail="Collection ID cannot be empty"
+                detail="database ID cannot be empty"
             )
         
         # Perform the search
@@ -110,7 +110,7 @@ async def search_datasets(
         
         return SearchResponse(
             query=query,
-            collection_name=id,
+            database_id=id,
             results=results,
             results_count=results_count,
             status="success"
