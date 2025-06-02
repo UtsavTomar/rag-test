@@ -101,7 +101,7 @@ async def search_datasets(
                     'context': result.get('context'),
                     'metadata': result.get('metadata')
                 }
-                for result in results.get('results', [])
+                for result in results
             ]
         
         # Calculate results count
