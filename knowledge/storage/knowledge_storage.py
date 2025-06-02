@@ -4,10 +4,13 @@ import io
 import logging
 import os
 import json
-from typing import Any, Dict, List, Optional, Union
 import psycopg2
-from psycopg2.extras import RealDictCursor
 import numpy as np
+import uuid
+from typing import Any, Dict, List, Optional, Union
+from psycopg2.extras import RealDictCursor
+from urllib.parse import urlparse
+from typing import Optional, Dict, Any
  
 from knowledge.storage.base_knowledge_storage import BaseKnowledgeStorage
 from knowledge.utilities import EmbeddingConfigurator
@@ -38,47 +41,33 @@ class KnowledgeStorage(BaseKnowledgeStorage):
     """
  
     connection: Optional[psycopg2.extensions.connection] = None
-    collection_name: str = "knowledge"
-    table_name: str = "knowledge_embeddings"
+    table_name: str = "vector_database"
  
+
     def __init__(
         self,
+        database_id: str,
         embedder: Optional[Dict[str, Any]] = None,
-        collection_name: Optional[str] = None,
-        db_host: str = "ep-broad-thunder-a5ebmxk0-pooler.us-east-2.aws.neon.tech",
-        db_port: int = 5432,
-        db_name: str = "neondb",
-        db_user: str = "neondb_owner",
-        db_password: str = "npg_hLdNTex4KUi9",
+        db_url: str = os.getenv("DATABASE_URL")
     ):
-        self.collection_name = collection_name or "knowledge"
-        self.table_name = self._sanitize_table_name(f"{self.collection_name}_embeddings")
+        self.database_id = database_id
+        self.table_name = "vector_database"
+        if db_url is None:
+            raise ValueError("DATABASE_URL environment variable not set")
+        
+        # Parse the PostgreSQL URL
+        parsed = urlparse(db_url)
         self.db_config = {
-            "host": db_host,
-            "port": db_port,
-            "database": db_name,
-            "user": db_user,
-            "password": db_password,
+            "host": parsed.hostname,
+            "port": parsed.port or 5432,
+            "database": parsed.path.lstrip('/') if parsed.path else "postgres",
+            "user": parsed.username,
+            "password": parsed.password,
         }
+        # Store the full URL as well
+        self.db_url = db_url
+        
         self._set_embedder_config(embedder)
- 
-    def _sanitize_table_name(self, name: str) -> str:
-        """Sanitize table name to be PostgreSQL compliant."""
-        import re
-        # Replace spaces and special characters with underscores
-        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
-        # Remove consecutive underscores
-        sanitized = re.sub(r'_+', '_', sanitized)
-        # Remove leading/trailing underscores
-        sanitized = sanitized.strip('_')
-        # Ensure it starts with a letter or underscore
-        if sanitized and not sanitized[0].isalpha() and sanitized[0] != '_':
-            sanitized = f"tbl_{sanitized}"
-        # Ensure it's not empty
-        if not sanitized:
-            sanitized = "knowledge_embeddings"
-        # Limit length to 63 characters (PostgreSQL limit)
-        return sanitized[:63].lower()
  
     def _get_connection(self):
         """Get database connection, creating one if it doesn't exist."""
@@ -101,14 +90,14 @@ class KnowledgeStorage(BaseKnowledgeStorage):
             query_text = " ".join(query)
             query_embedding = self._get_embedding(query_text)
            
-            # Build the SQL query with properly quoted table name
+            # Build the SQL query with database_id filter
             sql = f"""
-                SELECT id, metadata, context,
+                SELECT id, metadata, context, database_id,
                        1 - (embedding <=> %s::vector) as score
                 FROM "{self.table_name}"
-                WHERE 1 = 1
+                WHERE database_id = %s
             """
-            params = [query_embedding]
+            params = [query_embedding, self.database_id]
            
             # Add metadata filter if provided
             if filter:
@@ -132,6 +121,7 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                             "id": row["id"],
                             "metadata": row["metadata"],
                             "context": row["context"],
+                            "database_id": row["database_id"],
                             "score": float(row["score"]),
                         }
                         results.append(result)
@@ -150,10 +140,11 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                 # Enable pgvector extension
                 cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
                
-                # Create the embeddings table with properly quoted table name
+                # Create the embeddings table with database_id column
                 cursor.execute(f"""
                     CREATE TABLE IF NOT EXISTS "{self.table_name}" (
-                        id TEXT PRIMARY KEY,
+                        id uuid PRIMARY KEY,
+                        database_id uuid NOT NULL,
                         context TEXT NOT NULL,
                         metadata JSONB,
                         embedding VECTOR(1536),  -- Adjust dimension based on your embedding model
@@ -161,11 +152,17 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                     );
                 """)
                
-                # Create index for vector similarity search
+                # Create index for vector similarity search with database_id
                 cursor.execute(f"""
-                    CREATE INDEX IF NOT EXISTS "{self.table_name}_embedding_idx"
+                    CREATE INDEX IF NOT EXISTS "{self.table_name}_embedding_database_idx"
                     ON "{self.table_name}" USING ivfflat (embedding vector_cosine_ops)
-                    WITH (lists = 100);
+                    WHERE database_id IS NOT NULL;
+                """)
+               
+                # Create index on database_id for filtering
+                cursor.execute(f"""
+                    CREATE INDEX IF NOT EXISTS "{self.table_name}_database_id_idx"
+                    ON "{self.table_name}" (database_id);
                 """)
                
                 # Create index on metadata for filtering
@@ -175,28 +172,43 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                 """)
                
                 conn.commit()
-                Logger(verbose=True).log("info", f"Knowledge storage initialized with table: {self.table_name}", "green")
+                Logger(verbose=True).log("info", f"Knowledge storage initialized with table: {self.table_name} and database_id: {self.database_id}", "green")
                
         except Exception as e:
             Logger(verbose=True).log("error", f"Failed to initialize knowledge storage: {e}", "red")
             raise Exception(f"Failed to initialize knowledge storage: {e}")
  
-    def reset(self):
-        """Reset the knowledge storage by dropping the table."""
+    def reset(self, reset_all: bool = False):
+        """Reset the knowledge storage by dropping records for this collection or entire table."""
         try:
             if self.connection:
                 with self.connection.cursor() as cursor:
-                    cursor.execute(f'DROP TABLE IF EXISTS "{self.table_name}";')
+                    if reset_all:
+                        # Drop entire table
+                        cursor.execute(f'DROP TABLE IF EXISTS "{self.table_name}";')
+                        Logger(verbose=True).log("info", f"Entire table {self.table_name} dropped", "green")
+                    else:
+                        # Delete only records for this database_id
+                        cursor.execute(f'DELETE FROM "{self.table_name}" WHERE database_id = %s;', (self.database_id,))
+                        Logger(verbose=True).log("info", f"Records for database_id {self.database_id} deleted", "green")
+                    
                     self.connection.commit()
-               
-                self.connection.close()
-                self.connection = None
-               
-                Logger(verbose=True).log("info", f"Knowledge storage reset: {self.table_name} dropped", "green")
                
         except Exception as e:
             Logger(verbose=True).log("error", f"Failed to reset knowledge storage: {e}", "red")
             raise
+
+    def _generate_uuid_from_content(self, content: str) -> str:
+        """Generate a deterministic UUID from content using SHA-256 hash."""
+        # Create a SHA-256 hash of the content
+        hash_obj = hashlib.sha256(content.encode("utf-8"))
+        hash_hex = hash_obj.hexdigest()
+        
+        # Convert the first 32 characters of the hash to UUID format
+        # UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        uuid_str = f"{hash_hex[:8]}-{hash_hex[8:12]}-{hash_hex[12:16]}-{hash_hex[16:20]}-{hash_hex[20:32]}"
+        
+        return uuid_str
  
     def save(
         self,
@@ -213,7 +225,8 @@ class KnowledgeStorage(BaseKnowledgeStorage):
  
             # Generate IDs and create a mapping of id -> (document, metadata)
             for idx, doc in enumerate(documents):
-                doc_id = hashlib.sha256(doc.encode("utf-8")).hexdigest()
+                # Generate a UUID from the document content
+                doc_id = self._generate_uuid_from_content(doc)
                 doc_metadata = None
                 if metadata is not None:
                     if isinstance(metadata, list):
@@ -231,20 +244,21 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                     # Convert metadata to JSON
                     metadata_json = json.dumps(meta) if meta else None
                    
-                    # Upsert the document with properly quoted table name
+                    # Upsert the document with database_id
                     cursor.execute(f"""
-                        INSERT INTO "{self.table_name}" (id, context, metadata, embedding)
-                        VALUES (%s, %s, %s, %s::vector)
+                        INSERT INTO "{self.table_name}" (id, database_id, context, metadata, embedding)
+                        VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (id)
                         DO UPDATE SET
                             context = EXCLUDED.context,
                             metadata = EXCLUDED.metadata,
                             embedding = EXCLUDED.embedding,
                             created_at = CURRENT_TIMESTAMP;
-                    """, (doc_id, doc, metadata_json, embedding))
+                    """, (doc_id, self.database_id, doc, metadata_json, embedding))
+
                
                 self.connection.commit()
-                Logger(verbose=True).log("info", f"Saved {len(unique_docs)} unique documents", "green")
+                Logger(verbose=True).log("info", f"Saved {len(unique_docs)} unique documents for collection {self.database_id}", "green")
                
         except Exception as e:
             if self.connection:
@@ -281,7 +295,7 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                 def __call__(self, texts: List[str]) -> List[List[float]]:
                     response = self.client.embeddings.create(
                         input=texts,
-                        model=self.model
+                        model=self.model,
                     )
                     return [data.embedding for data in response.data]
            
@@ -311,4 +325,3 @@ class KnowledgeStorage(BaseKnowledgeStorage):
         """Clean up database connection."""
         if hasattr(self, 'connection') and self.connection and not self.connection.closed:
             self.connection.close()
- 

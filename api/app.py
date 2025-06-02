@@ -18,20 +18,20 @@ app = FastAPI()
 # Response model
 class SearchResponse(BaseModel):
     query: str
-    collection_name: str
+    database_id: str
     results: Union[List[Any], str, dict]  # Allow list, string, or dict
     results_count: int
     status: str
 
-def search_datasets_by_similarity(query_text: str, collection_name: str) -> Union[List[Any], str, dict]:
+def search_datasets_by_similarity(query_text: str, database_id: str) -> Union[List[Any], str, dict]:
     """Search for the most relevant datasets using vector similarity based on user query"""
     try:
-        knowledge_storage = KnowledgeStorage(collection_name=collection_name)
+        knowledge_storage = KnowledgeStorage(database_id=database_id)
         base_knowledge_source = BaseKnowledgeSourceSearch(storage=knowledge_storage)
         knowledge_test = Knowledge(
             storage=knowledge_storage,
             sources=[base_knowledge_source],
-            collection_name=collection_name
+            database_id=database_id
         )
         result = knowledge_test.query([query_text])
         return result
@@ -61,7 +61,7 @@ async def search_datasets(
     ),
     id: str = Query(
         "json_test",
-        description="Collection name/ID to search within",
+        description="Database ID to search within",
         min_length=1,
         max_length=100,
         alias="id"
@@ -106,7 +106,7 @@ async def search_datasets(
         elif isinstance(results, str) and results:
             results_count = 1
         
-        logger.info(f"Search completed successfully for query: '{query}' in collection: '{id}' - Found {results_count} results")
+        logger.info(f"Search completed successfully for query: '{query}' in Database: '{id}' - Found {results_count} results")
         
         return SearchResponse(
             query=query,

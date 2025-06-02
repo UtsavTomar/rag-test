@@ -22,11 +22,11 @@ class Knowledge(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     storage: Optional[KnowledgeStorage] = Field(default=None)
     embedder: Optional[Dict[str, Any]] = None
-    collection_name: Optional[str] = None
+    database_id: Optional[str] = None
 
     def __init__(
         self,
-        collection_name: str,
+        database_id: str,
         sources: List[BaseKnowledgeSource],
         embedder: Optional[Dict[str, Any]] = None,
         storage: Optional[KnowledgeStorage] = None,
@@ -37,7 +37,7 @@ class Knowledge(BaseModel):
             self.storage = storage
         else:
             self.storage = KnowledgeStorage(
-                embedder=embedder, collection_name=collection_name
+                embedder=embedder, database_id=database_id
             )
         self.sources = sources
         self.storage.initialize_knowledge_storage()
