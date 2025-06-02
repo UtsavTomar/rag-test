@@ -96,6 +96,13 @@ async def search_datasets(
         
         # Perform the search
         results = search_datasets_by_similarity(query.strip(), id.strip())
+        results = [
+                {
+                    'context': result.get('context'),
+                    'metadata': result.get('metadata')
+                }
+                for result in results.get('results', [])
+            ]
         
         # Calculate results count
         results_count = 0
