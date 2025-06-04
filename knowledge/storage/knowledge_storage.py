@@ -1,4 +1,3 @@
-import boto3
 import contextlib
 import hashlib
 import io
@@ -12,7 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 from psycopg2.extras import RealDictCursor
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any
-
+ 
  
 from knowledge.storage.base_knowledge_storage import BaseKnowledgeStorage
 from knowledge.utilities import EmbeddingConfigurator
@@ -34,49 +33,27 @@ def suppress_logging(
     ):
         yield
     logger.setLevel(original_level)
-
-def get_ssm_parameter(param_name: str) -> str:
-    """
-    Get parameter from AWS SSM Parameter Store.
-
-    Args:
-        param_name (str): Parameter name in SSM
-
-    Returns:
-        str: Parameter value
-
-    Raises:
-        Exception: If parameter retrieval fails
-    """
-    try:
-        ssm_client = boto3.client('ssm')
-        response = ssm_client.get_parameter(
-            Name=param_name,
-            WithDecryption=True
-        )
-        return response['Parameter']['Value']
-    except boto3.exceptions.Boto3Error as e:
-        raise Exception(f"Failed to get parameter '{param_name}' from SSM: {str(e)}")
-
+ 
+ 
 def get_db_connection():
     """
     Create and return a database connection.
-    
+   
     Returns:
         psycopg2.connection: A connection to the PostgreSQL database.
-        
+       
     Raises:
         Exception: If the database connection string is not found or connection fails.
     """
     DATABASE_URL = os.getenv("DATABASE_URL")
     if not DATABASE_URL:
         raise Exception("Database url not found")
-    
+   
     try:
         connection = psycopg2.connect(DATABASE_URL)
         return connection
     except Exception as e:
-        raise 
+        raise
  
 class KnowledgeStorage(BaseKnowledgeStorage):
     """
@@ -87,7 +64,7 @@ class KnowledgeStorage(BaseKnowledgeStorage):
     connection: Optional[psycopg2.extensions.connection] = None
     table_name: str = '"agentic-platform"."DatasetVectorStoreRecords"'
  
-
+ 
     def __init__(
         self,
         dataset_metadata_id: str,
@@ -96,22 +73,13 @@ class KnowledgeStorage(BaseKnowledgeStorage):
     ):
         self.dataset_metadata_id = dataset_metadata_id
         self.table_name = '"agentic-platform"."DatasetVectorStoreRecords"'
-        
+       
         # Define base table name for index creation (without quotes)
         self.base_table_name = "agentic_platform_DatasetVectorStoreRecords"
-        
-        # Ensure env variables are set in this runtime context
-        if not os.getenv("DATABASE_URL") or not os.getenv("OPENAI_API_KEY"):
-            ENVIRONMENT = os.getenv("ENVIRONMENT")
-            db_param_name = f"/agent-runtime/{ENVIRONMENT}/db-connection-string"
-            openai_param_name = f"/agent-runtime/{ENVIRONMENT}/openai_api_key"
-            os.environ["DATABASE_URL"] = get_ssm_parameter(db_param_name)
-            os.environ["OPENAI_API_KEY"] = get_ssm_parameter(openai_param_name)
-            db_url = os.getenv("DATABASE_URL")
-
+       
         # Store the full URL as well
         self.db_url = db_url
-        
+       
         self._set_embedder_config(embedder)
  
     def _get_connection(self):
@@ -237,23 +205,23 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                         # Delete only records for this dataset_metadata_id
                         cursor.execute(f'DELETE FROM {self.table_name} WHERE dataset_metadata_id = %s;', (self.dataset_metadata_id,))
                         Logger(verbose=True).log("info", f"Records for dataset_metadata_id {self.dataset_metadata_id} deleted", "green")
-                    
+                   
                     self.connection.commit()
                
         except Exception as e:
             Logger(verbose=True).log("error", f"Failed to reset knowledge storage: {e}", "red")
             raise
-
+ 
     def _generate_uuid_from_content(self, content: str) -> str:
         """Generate a deterministic UUID from content using SHA-256 hash."""
         # Create a SHA-256 hash of the content
         hash_obj = hashlib.sha256(content.encode("utf-8"))
         hash_hex = hash_obj.hexdigest()
-        
+       
         # Convert the first 32 characters of the hash to UUID format
         # UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         uuid_str = f"{hash_hex[:8]}-{hash_hex[8:12]}-{hash_hex[12:16]}-{hash_hex[16:20]}-{hash_hex[20:32]}"
-        
+       
         return uuid_str
  
     def save(
@@ -301,7 +269,7 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                             embedding = EXCLUDED.embedding,
                             created_at = CURRENT_TIMESTAMP;
                     """, (doc_id, self.dataset_metadata_id, doc, metadata_json, embedding))
-
+ 
                
                 self.connection.commit()
                 Logger(verbose=True).log("info", f"Saved {len(unique_docs)} unique documents for collection {self.dataset_metadata_id}", "green")
@@ -371,3 +339,5 @@ class KnowledgeStorage(BaseKnowledgeStorage):
         """Clean up database connection."""
         if hasattr(self, 'connection') and self.connection and not self.connection.closed:
             self.connection.close()
+ 
+ 
