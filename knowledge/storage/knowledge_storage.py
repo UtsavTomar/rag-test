@@ -1,3 +1,4 @@
+import boto3
 import contextlib
 import hashlib
 import io
@@ -11,6 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 from psycopg2.extras import RealDictCursor
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any
+
  
 from knowledge.storage.base_knowledge_storage import BaseKnowledgeStorage
 from knowledge.utilities import EmbeddingConfigurator
@@ -32,7 +34,49 @@ def suppress_logging(
     ):
         yield
     logger.setLevel(original_level)
- 
+
+def get_ssm_parameter(param_name: str) -> str:
+    """
+    Get parameter from AWS SSM Parameter Store.
+
+    Args:
+        param_name (str): Parameter name in SSM
+
+    Returns:
+        str: Parameter value
+
+    Raises:
+        Exception: If parameter retrieval fails
+    """
+    try:
+        ssm_client = boto3.client('ssm')
+        response = ssm_client.get_parameter(
+            Name=param_name,
+            WithDecryption=True
+        )
+        return response['Parameter']['Value']
+    except boto3.exceptions.Boto3Error as e:
+        raise Exception(f"Failed to get parameter '{param_name}' from SSM: {str(e)}")
+
+def get_db_connection():
+    """
+    Create and return a database connection.
+    
+    Returns:
+        psycopg2.connection: A connection to the PostgreSQL database.
+        
+    Raises:
+        Exception: If the database connection string is not found or connection fails.
+    """
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise Exception("Database url not found")
+    
+    try:
+        connection = psycopg2.connect(DATABASE_URL)
+        return connection
+    except Exception as e:
+        raise 
  
 class KnowledgeStorage(BaseKnowledgeStorage):
     """
@@ -41,29 +85,30 @@ class KnowledgeStorage(BaseKnowledgeStorage):
     """
  
     connection: Optional[psycopg2.extensions.connection] = None
-    table_name: str = "vector_database"
+    table_name: str = '"agentic-platform"."DatasetVectorStoreRecords"'
  
 
     def __init__(
         self,
-        database_id: str,
+        dataset_metadata_id: str,
         embedder: Optional[Dict[str, Any]] = None,
         db_url: str = os.getenv("DATABASE_URL")
     ):
-        self.database_id = database_id
-        self.table_name = "vector_database"
-        if db_url is None:
-            raise ValueError("DATABASE_URL environment variable not set")
+        self.dataset_metadata_id = dataset_metadata_id
+        self.table_name = '"agentic-platform"."DatasetVectorStoreRecords"'
         
-        # Parse the PostgreSQL URL
-        parsed = urlparse(db_url)
-        self.db_config = {
-            "host": parsed.hostname,
-            "port": parsed.port or 5432,
-            "database": parsed.path.lstrip('/') if parsed.path else "postgres",
-            "user": parsed.username,
-            "password": parsed.password,
-        }
+        # Define base table name for index creation (without quotes)
+        self.base_table_name = "agentic_platform_DatasetVectorStoreRecords"
+        
+        # Ensure env variables are set in this runtime context
+        if not os.getenv("DATABASE_URL") or not os.getenv("OPENAI_API_KEY"):
+            ENVIRONMENT = os.getenv("ENVIRONMENT")
+            db_param_name = f"/agent-runtime/{ENVIRONMENT}/db-connection-string"
+            openai_param_name = f"/agent-runtime/{ENVIRONMENT}/openai_api_key"
+            os.environ["DATABASE_URL"] = get_ssm_parameter(db_param_name)
+            os.environ["OPENAI_API_KEY"] = get_ssm_parameter(openai_param_name)
+            db_url = os.getenv("DATABASE_URL")
+
         # Store the full URL as well
         self.db_url = db_url
         
@@ -72,7 +117,7 @@ class KnowledgeStorage(BaseKnowledgeStorage):
     def _get_connection(self):
         """Get database connection, creating one if it doesn't exist."""
         if self.connection is None or self.connection.closed:
-            self.connection = psycopg2.connect(**self.db_config)
+            self.connection = get_db_connection()
         return self.connection
  
     def search(
@@ -90,14 +135,14 @@ class KnowledgeStorage(BaseKnowledgeStorage):
             query_text = " ".join(query)
             query_embedding = self._get_embedding(query_text)
            
-            # Build the SQL query with database_id filter
+            # Build the SQL query with dataset_metadata_id filter
             sql = f"""
-                SELECT id, metadata, context, database_id,
+                SELECT id, metadata, context, dataset_metadata_id,
                        1 - (embedding <=> %s::vector) as score
-                FROM "{self.table_name}"
-                WHERE database_id = %s
+                FROM {self.table_name}
+                WHERE dataset_metadata_id = %s
             """
-            params = [query_embedding, self.database_id]
+            params = [query_embedding, self.dataset_metadata_id]
            
             # Add metadata filter if provided
             if filter:
@@ -121,7 +166,7 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                             "id": row["id"],
                             "metadata": row["metadata"],
                             "context": row["context"],
-                            "database_id": row["database_id"],
+                            "dataset_metadata_id": row["dataset_metadata_id"],
                             "score": float(row["score"]),
                         }
                         results.append(result)
@@ -140,11 +185,11 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                 # Enable pgvector extension
                 cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
                
-                # Create the embeddings table with database_id column
+                # Create the embeddings table with dataset_metadata_id column
                 cursor.execute(f"""
-                    CREATE TABLE IF NOT EXISTS "{self.table_name}" (
+                    CREATE TABLE IF NOT EXISTS {self.table_name} (
                         id uuid PRIMARY KEY,
-                        database_id uuid NOT NULL,
+                        dataset_metadata_id uuid NOT NULL,
                         context TEXT NOT NULL,
                         metadata JSONB,
                         embedding VECTOR(1536),  -- Adjust dimension based on your embedding model
@@ -152,27 +197,28 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                     );
                 """)
                
-                # Create index for vector similarity search with database_id
+                # Create index for vector similarity search with dataset_metadata_id
+                # Using properly quoted index names
                 cursor.execute(f"""
-                    CREATE INDEX IF NOT EXISTS "{self.table_name}_embedding_database_idx"
-                    ON "{self.table_name}" USING ivfflat (embedding vector_cosine_ops)
-                    WHERE database_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS "{self.base_table_name}_embedding_dataset_metadata_idx"
+                    ON {self.table_name} USING ivfflat (embedding vector_cosine_ops)
+                    WHERE dataset_metadata_id IS NOT NULL;
                 """)
                
-                # Create index on database_id for filtering
+                # Create index on dataset_metadata_id for filtering
                 cursor.execute(f"""
-                    CREATE INDEX IF NOT EXISTS "{self.table_name}_database_id_idx"
-                    ON "{self.table_name}" (database_id);
+                    CREATE INDEX IF NOT EXISTS "{self.base_table_name}_dataset_metadata_id_idx"
+                    ON {self.table_name} (dataset_metadata_id);
                 """)
                
                 # Create index on metadata for filtering
                 cursor.execute(f"""
-                    CREATE INDEX IF NOT EXISTS "{self.table_name}_metadata_idx"
-                    ON "{self.table_name}" USING gin (metadata);
+                    CREATE INDEX IF NOT EXISTS "{self.base_table_name}_metadata_idx"
+                    ON {self.table_name} USING gin (metadata);
                 """)
                
                 conn.commit()
-                Logger(verbose=True).log("info", f"Knowledge storage initialized with table: {self.table_name} and database_id: {self.database_id}", "green")
+                Logger(verbose=True).log("info", f"Knowledge storage initialized with table: {self.table_name} and dataset_metadata_id: {self.dataset_metadata_id}", "green")
                
         except Exception as e:
             Logger(verbose=True).log("error", f"Failed to initialize knowledge storage: {e}", "red")
@@ -185,12 +231,12 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                 with self.connection.cursor() as cursor:
                     if reset_all:
                         # Drop entire table
-                        cursor.execute(f'DROP TABLE IF EXISTS "{self.table_name}";')
+                        cursor.execute(f'DROP TABLE IF EXISTS {self.table_name};')
                         Logger(verbose=True).log("info", f"Entire table {self.table_name} dropped", "green")
                     else:
-                        # Delete only records for this database_id
-                        cursor.execute(f'DELETE FROM "{self.table_name}" WHERE database_id = %s;', (self.database_id,))
-                        Logger(verbose=True).log("info", f"Records for database_id {self.database_id} deleted", "green")
+                        # Delete only records for this dataset_metadata_id
+                        cursor.execute(f'DELETE FROM {self.table_name} WHERE dataset_metadata_id = %s;', (self.dataset_metadata_id,))
+                        Logger(verbose=True).log("info", f"Records for dataset_metadata_id {self.dataset_metadata_id} deleted", "green")
                     
                     self.connection.commit()
                
@@ -244,9 +290,9 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                     # Convert metadata to JSON
                     metadata_json = json.dumps(meta) if meta else None
                    
-                    # Upsert the document with database_id
+                    # Upsert the document with dataset_metadata_id
                     cursor.execute(f"""
-                        INSERT INTO "{self.table_name}" (id, database_id, context, metadata, embedding)
+                        INSERT INTO {self.table_name} (id, dataset_metadata_id, context, metadata, embedding)
                         VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (id)
                         DO UPDATE SET
@@ -254,11 +300,11 @@ class KnowledgeStorage(BaseKnowledgeStorage):
                             metadata = EXCLUDED.metadata,
                             embedding = EXCLUDED.embedding,
                             created_at = CURRENT_TIMESTAMP;
-                    """, (doc_id, self.database_id, doc, metadata_json, embedding))
+                    """, (doc_id, self.dataset_metadata_id, doc, metadata_json, embedding))
 
                
                 self.connection.commit()
-                Logger(verbose=True).log("info", f"Saved {len(unique_docs)} unique documents for collection {self.database_id}", "green")
+                Logger(verbose=True).log("info", f"Saved {len(unique_docs)} unique documents for collection {self.dataset_metadata_id}", "green")
                
         except Exception as e:
             if self.connection:

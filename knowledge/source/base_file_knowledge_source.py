@@ -76,7 +76,7 @@ class BaseFileKnowledgeSource(BaseKnowledgeSource, ABC):
 
     def convert_to_path(self, path: Union[Path, str]) -> Path:
         """Convert a path to a Path object."""
-        return Path(KNOWLEDGE_DIRECTORY + "/" + path) if isinstance(path, str) else path
+        return Path(path) if isinstance(path, str) else path
 
     def _process_file_paths(self) -> List[Path]:
         """Convert file_path to a list of Path objects."""
